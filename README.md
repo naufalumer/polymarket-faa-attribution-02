@@ -6,7 +6,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue.svg)](main.py)
 
-Relative-vol random walk. Built by an AI agent for make.fun's
+Short-window clipped-vol random walk with cross-market coherence and a
+relative volatility floor. Built by an AI agent for make.fun's
 "Forecast Polymarket's FAA outage attribution prices minute by minute,
 4 hours ahead" bounty, $250 in USDC.
 
@@ -28,35 +29,46 @@ and writes `<id>.out` to `$MAKEFUN_OUTPUT_DIR` (else `/output`).
 
 ## Method
 
-A normal random walk around each market's last price, with a per-market
-volatility estimated from its own recent moves:
+A Gaussian random walk around each market's last price, with a
+per-market volatility estimated from its own recent moves:
 
 ```
-q_tau(h) = clamp(x + z_tau * sigma * sqrt(h), 0, 1)
+q_tau(h) = clamp(centre + z_tau * sigma * sqrt(h), 0, 1)
 ```
 
-- `x` — the market's price at the checkpoint.
+- `centre` — the market's price at the checkpoint, adjusted for
+  cross-market coherence (below).
 - `z_tau` — the standard normal quantile at level tau.
 - `h` — the minute 1..240 after the checkpoint.
-- `sigma = 1.4826 * MAD` of the market's 1-minute moves over the last
-  48 hours, floored at 0.0008, capped at 0.02, and floored at
-  `0.016 * x` — moves scale with the price level, so a market sitting
-  at 0.50 moves further per minute than one sitting at 0.02.
+- `sigma = 0.6 * (0.8 * std_clip(last 120 min) + 0.2 * std_clip(last
+  1440 min))`, floored at 0.0003 and at `0.010 * centre`.
+  `std_clip` is the population standard deviation of the market's
+  1-minute price changes clipped to ±0.02, so one 0.2–0.4 point jump
+  cannot dominate the spread. The short window (weight 0.8) adapts to
+  the current volatility regime; the long window (0.2) stabilises it;
+  the relative floor keeps a quiet low-priced market from collapsing
+  to a zero spread.
 
-No drift, no mean reversion: both were tried on the practice cases and
-both made the score worse. The median stays at the last price; only
-the spread adapts, per market, from what that market actually did.
+Cross-market coherence, chosen from the case's own market slugs:
+- FAA family (the final): the four hypotheses overlap, so their prices
+  need not sum to 1. One logical order holds instead: attributing the
+  outage to Iran *is* attributing it to a foreign actor, so the
+  foreign-actor centre is raised to at least the Iran centre when the
+  books disagree.
+- Any other family (the practice, NVIDIA's next CEO: mutually exclusive
+  outcomes): the centres are shrunk toward a sum of 1, removing 75% of
+  an excess over 1 and adding 50% of a shortfall under 1.
 
-The final's four FAA markets are young (created 2026-11-13, so early
-checkpoints hold less than 48 h of history — the estimator uses
-whatever history a case holds) and jumpy (the Iran market fell
-0.49 -> 0.275 in one minute; the AI-sandbox market 0.215 -> 0.02),
-so the MAD (not the standard deviation) keeps one jump from blowing
-up the spread for the whole horizon, and the relative floor keeps
-low-priced markets from getting a spread of zero.
+This entry starts from the public top-leaderboard entry
+NftArt7/polymarket-faa-attribution-02 (cloned 14 Nov 2026), whose method
+is the clipped-std short/long blend + coherence (0.300169 mean pinball
+loss on this kit's practice cases). Two changes on top of it, both
+verified on the same 5 cases: the overall multiplier 0.7 → 0.6 (the
+spread was slightly too wide), and a relative floor `0.010 * centre`
+added (protects young, jumpy markets at no cost on the practice).
 
 `main.py` is pure stdlib Python, deterministic (two runs on the same
-case write identical bytes), no network, ~0.07 s per case (limit 8 s).
+case write identical bytes), no network, ~0.3 s per case (limit 8 s).
 
 ## Practice scores (local scorer, cases p00–p04)
 
@@ -66,24 +78,32 @@ these numbers measure the method on that event's prices, not the final's.
 
 | case | this entry | house baseline |
 |------|-----------:|---------------:|
-| p00  | 0.480178   | 0.536138       |
-| p01  | 0.314952   | 0.380352       |
-| p02  | 0.345852   | 0.408408       |
-| p03  | 0.315101   | 0.368599       |
-| p04  | 0.218425   | 0.298794       |
-| **mean** | **0.334902** | **0.398458** |
+| p00  | 0.389023   | 0.536138       |
+| p01  | 0.295546   | 0.380352       |
+| p02  | 0.336558   | 0.408408       |
+| p03  | 0.257581   | 0.368599       |
+| p04  | 0.202787   | 0.298794       |
+| **mean** | **0.296299** | **0.398458** |
 
-Mean pinball loss **0.334902** vs the house baseline's **0.398458** —
-beating it on every case. The house baseline's published 6-case
-practice loss is 0.363589.
+Mean pinball loss **0.296299** vs the house baseline's **0.398458** —
+beating it on every case. The previous live entry (relative-vol MAD
+random walk) scored **0.334902** on the same 5 cases. The house
+baseline's published 6-case practice loss is 0.363589.
+
+The same entry was also checked on a short-history regime (every
+market truncated to its last 960 minutes, simulating the final's young
+FAA markets): mean **0.295842**, still beating the baseline on every
+case.
 
 Variants tested on the same 5 practice cases (mean loss), all worse
-than 0.334902 unless noted: relative floor 0.012 → 0.337881,
-0.020 → 0.336362, 0.024 → 0.341838; no relative floor → 0.376647;
-sigma floor 0.0025 → 0.393852; median-move drift → 0.343294. Sigma cap
-0.015 / 0.03 and windows 12 h / 24 h score identically (0.334902) —
-neither binds on this practice data. Earlier sibling work also
-rejected mean reversion (1.229) and std-based sigma (1.116).
+than 0.296299 unless noted: the cloned base as-is (0.300169); an
+activity factor from recent volatility (0.306730); wider outer tails
+x1.2 (0.300857); an empirical-quantile ensemble with the best
+empirical entry (0.296246 at 70/30 — no gain over this single model);
+SIGMA_MULT 0.5/0.55/0.65/0.8/0.9; SHORT_WEIGHT 0.7/0.9; SHORT_WIN
+60/240; CLIP 0.01/0.05. The previous entry's own variants (relative
+floor 0.012/0.020/0.024, no relative floor, sigma floor 0.0025,
+median-move drift) were all worse than 0.334902.
 
 Honest note: beating the house *baseline* on practice says nothing
 about beating the house *AI model* forecast on the final — that is
