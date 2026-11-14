@@ -41,7 +41,10 @@ history, but with two measured departures from a plain random walk:
      deviation of 1-minute price changes over the last 120 minutes,
      each change clipped to +/-0.02 so one jump cannot dominate,
      times MULT = 0.6, floored at 0.0003 and at REL_FLOOR * last price
-     (0.010). The long 1440-minute window that rev2 blended in
+     (0.010). A market with no history at all forecasts around its
+     coherent level with the minimum spread instead of failing the
+     whole entry (the coherence step already falls back to level 0.5
+     for such a market). The long 1440-minute window that rev2 blended in
      (weight 0.2) was dropped: volatility clusters (lag-1
      autocorrelation of |changes| is +0.1 to +0.5), so the recent
      regime is the informative one, and the long window only dilutes
@@ -197,10 +200,18 @@ def _market_rows(market, level, horizon):
     more slowly than sqrt(h) (price moves are steps, not diffusion).
     """
     prices = market["prices"]
-    if not prices:
-        raise ValueError("market %s has no prices" % market["id"])
-    last = prices[-1]
-    sigma = _recent_vol(prices) * VOL_MULT
+    if prices:
+        # Normal path: volatility from the recent clipped changes.
+        last = prices[-1]
+        sigma = _recent_vol(prices) * VOL_MULT
+    else:
+        # A market with no history yet (possible for the final's young
+        # FAA markets): forecast around its coherent level with the
+        # minimum spread instead of failing the whole entry. The
+        # coherence step already falls back to level 0.5 for such a
+        # market; raising here would discard every other market.
+        last = level
+        sigma = 0.0
     if sigma < ABS_FLOOR:
         sigma = ABS_FLOOR
     rel = REL_FLOOR * last
